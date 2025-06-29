@@ -5,6 +5,7 @@ import seaborn as sns
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, optimizers, callbacks, models
+from tensorflow.keras.layers import GlobalAveragePooling2D  # ✅ Fix added here
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import confusion_matrix, classification_report
 import gradio as gr
@@ -95,7 +96,7 @@ inputs = layers.Input(shape=(124, 124, 3))
 x = data_augmentation(inputs)
 x = layers.Rescaling(1./255)(x)
 x = base_model(x)
-x = GlobalAveragePooling2D()(x)
+x = GlobalAveragePooling2D()(x)  # ✅ Fix used here after import
 x = layers.Dropout(0.3)(x)
 outputs = layers.Dense(len(class_names), activation='softmax')(x)
 
