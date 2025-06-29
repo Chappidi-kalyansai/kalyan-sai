@@ -1,0 +1,197 @@
+# 📦 Import Libraries
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, optimizers, callbacks, models
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import confusion_matrix, classification_report
+import gradio as gr
+from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
+
+# 📂 Dataset Setup
+dataset_dir = r"/content/drive/MyDrive/TrashType_Image_Dataset"
+image_size = (124, 124)
+batch_size = 32
+seed = 42
+
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    dataset_dir, validation_split=0.2, subset="training",
+    seed=seed, shuffle=True, image_size=image_size, batch_size=batch_size
+)
+
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    dataset_dir, validation_split=0.2, subset="validation",
+    seed=seed, shuffle=True, image_size=image_size, batch_size=batch_size
+)
+
+# ⚖ Class Names and Splits
+class_names = train_ds.class_names
+val_batches = tf.data.experimental.cardinality(val_ds)
+test_ds = val_ds.take(val_batches // 2)
+val_dat = val_ds.skip(val_batches // 2)
+test_ds_eval = test_ds.cache().prefetch(tf.data.AUTOTUNE)
+
+# 📊 Visualize Class Distribution
+def count_distribution(dataset, class_names):
+    total = 0
+    counts = {name: 0 for name in class_names}
+    for _, labels in dataset:
+        for label in labels.numpy():
+            counts[class_names[label]] += 1
+            total += 1
+    for k in counts:
+        counts[k] = round((counts[k] / total) * 100, 2)
+    return counts
+
+def simple_bar_plot(dist, title):
+    plt.bar(dist.keys(), dist.values(), color='cornflowerblue')
+    plt.title(title)
+    plt.ylabel('Percentage (%)')
+    plt.xticks(rotation=45)
+    plt.ylim(0, 100)
+    plt.tight_layout()
+    plt.show()
+
+train_dist = count_distribution(train_ds, class_names)
+val_dist = count_distribution(val_ds, class_names)
+test_dist = count_distribution(test_ds, class_names)
+simple_bar_plot(train_dist, "Training Set Class Distribution (%)")
+simple_bar_plot(val_dist, "Validation Set Class Distribution (%)")
+simple_bar_plot(test_dist, "Test Set Class Distribution (%)")
+
+# ⚖ Compute Class Weights
+class_counts = {i: 0 for i in range(len(class_names))}
+all_labels = []
+for _, labels in train_ds:
+    for label in labels.numpy():
+        class_counts[label] += 1
+        all_labels.append(label)
+
+class_weights_array = compute_class_weight(
+    class_weight='balanced', classes=np.arange(len(class_names)), y=all_labels
+)
+class_weights = {i: w for i, w in enumerate(class_weights_array)}
+
+# 🧪 Data Augmentation
+data_augmentation = keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.1),
+    layers.RandomContrast(0.1),
+])
+
+# 🔍 Base Model with Preprocessing
+base_model = tf.keras.applications.EfficientNetV2B2(
+    include_top=False, weights='imagenet', input_shape=(124, 124, 3)
+)
+base_model.trainable = True
+for layer in base_model.layers[:100]:
+    layer.trainable = False
+
+# 🧠 Final Model (Functional API)
+inputs = layers.Input(shape=(124, 124, 3))
+x = data_augmentation(inputs)
+x = layers.Rescaling(1./255)(x)
+x = base_model(x)
+x = GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
+outputs = layers.Dense(len(class_names), activation='softmax')(x)
+
+model = models.Model(inputs, outputs)
+
+model.compile(
+    optimizer=optimizers.Adam(learning_rate=1e-4),
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# 🛑 Callbacks
+early_stop = callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+checkpoint = callbacks.ModelCheckpoint("best_model.keras", monitor="val_accuracy", save_best_only=True)
+reduce_lr = callbacks.ReduceLROnPlateau(monitor='val_loss', patience=2, factor=0.5, verbose=1)
+
+# 🚀 Train Model
+history = model.fit(
+    train_ds, validation_data=val_ds, epochs=15, batch_size=batch_size,
+    class_weight=class_weights,
+    callbacks=[early_stop, checkpoint, reduce_lr]
+)
+
+# 📈 Plot Accuracy and Loss
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+epochs_range = range(len(acc))
+
+plt.figure(figsize=(10, 8))
+plt.subplot(1, 2, 1)
+plt.plot(epochs_range, acc, label='Training Accuracy')
+plt.plot(epochs_range, val_acc, label='Validation Accuracy')
+plt.legend(loc='lower right')
+plt.title('Training vs Validation Accuracy')
+
+plt.subplot(1, 2, 2)
+plt.plot(epochs_range, loss, label='Training Loss')
+plt.plot(epochs_range, val_loss, label='Validation Loss')
+plt.legend(loc='upper right')
+plt.title('Training vs Validation Loss')
+plt.show()
+
+# ✅ Evaluate on Test Set
+loss, accuracy = model.evaluate(test_ds_eval)
+print(f'Test accuracy: {accuracy:.4f}, Test loss: {loss:.4f}')
+
+# 🧾 Classification Report
+y_true = np.concatenate([y.numpy() for _, y in test_ds_eval])
+y_pred_probs = model.predict(test_ds_eval)
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+cm = confusion_matrix(y_true, y_pred)
+print(cm)
+print(classification_report(y_true, y_pred))
+
+plt.figure(figsize=(10, 8))
+sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_names, yticklabels=class_names, cmap='Blues')
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix')
+plt.show()
+
+# 🖼 Visual Predictions
+for images, labels in test_ds_eval.take(1):
+    predictions = model.predict(images)
+    pred_labels = tf.argmax(predictions, axis=1)
+    for i in range(8):
+        plt.imshow(images[i].numpy().astype("uint8"))
+        plt.title(f"True: {class_names[labels[i]]}, Pred: {class_names[pred_labels[i]]}")
+        plt.axis("off")
+        plt.show()
+
+# 💾 Save the Model
+model.save('EfficientNet_GarbageClassifier.keras')
+
+# 🌐 Gradio Interface
+def classify_image(img):
+    img = img.resize((124, 124))
+    img_array = np.array(img, dtype=np.float32)
+    img_array = preprocess_input(img_array)
+    img_array = np.expand_dims(img_array, axis=0)
+    prediction = model.predict(img_array)
+    predicted_class_index = np.argmax(prediction)
+    predicted_class_name = class_names[predicted_class_index]
+    confidence = prediction[0][predicted_class_index]
+    return f"Predicted: {predicted_class_name} (Confidence: {confidence:.2f})"
+
+iface = gr.Interface(
+    fn=classify_image,
+    inputs=gr.Image(type="pil", label="Upload Garbage Image"),
+    outputs=gr.Textbox(label="Prediction"),
+    title="Garbage Classifier using EfficientNetV2B2",
+    description="Upload an image of garbage, and the model will classify the type.",
+    examples=[]
+)
+
+iface.launch()
